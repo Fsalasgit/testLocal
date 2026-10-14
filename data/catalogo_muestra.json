@@ -1,0 +1,201 @@
+{
+  "fuente": "https://dazimportadora.com.ar/productos/",
+  "tipo": "muestra_verificada_no_catalogo_completo",
+  "fecha_consulta": "2026-10-14",
+  "moneda": "ARS",
+  "categorias_principales": [
+    "Temporada",
+    "Audio",
+    "Belleza & Cuidado Personal",
+    "Bulltec",
+    "Deporte",
+    "Ferretería",
+    "Hogar",
+    "Libreria",
+    "Mascotas",
+    "Mochilas y Marroquinería",
+    "Jugueteria",
+    "Productos Varios",
+    "Tecnología"
+  ],
+  "productos": [
+    {
+      "sku": "0801001seis",
+      "nombre": "LAVARROPAS y SECCARROPAS SUONO 10kg de lavado y 6KG de secado 1200RPM",
+      "marca": "Suono",
+      "categorias": [
+        "Hogar",
+        "Electrodomésticos",
+        "Limpieza"
+      ],
+      "precio_lista": 813200,
+      "precio_efectivo": 760000,
+      "stock_estado": null
+    },
+    {
+      "sku": "01050090",
+      "nombre": "PLANCHA A VAPOR INALAMBRICA WESTINGHOUSE PLA-PL2201-WH",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Limpieza"
+      ],
+      "precio_lista": 53500,
+      "precio_efectivo": 50000,
+      "stock_estado": null
+    },
+    {
+      "sku": "05030128",
+      "nombre": "Estabilizador Prolongador Kanji Sl9205",
+      "marca": "Kanji",
+      "categorias": [
+        "Ferretería",
+        "Prolongadores & Adaptadores",
+        "Seguridad"
+      ],
+      "precio_lista": 37450,
+      "precio_efectivo": 35000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01060086",
+      "nombre": "EXPRIMIDOR DE JUGO KANJI JM045/JM044",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Cocina",
+        "Electrodomésticos"
+      ],
+      "precio_lista": 21400,
+      "precio_efectivo": 20000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01060041",
+      "nombre": "ANAFE KANJI DOBLE HP2200BDD",
+      "marca": null,
+      "categorias": [
+        "Productos Varios"
+      ],
+      "precio_lista": 32100,
+      "precio_efectivo": 30000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01070039",
+      "nombre": "Ventilador TURBO KACEMASTER 16 Pulgadas",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Climatización"
+      ],
+      "precio_lista": 39590,
+      "precio_efectivo": 37000,
+      "stock_estado": "Stock Alto"
+    },
+    {
+      "sku": "02010136",
+      "nombre": "Auricular con Cable Auxiliar AKG S8/S8+",
+      "marca": null,
+      "categorias": [
+        "Audio",
+        "Auricular con cable"
+      ],
+      "precio_lista": 1926,
+      "precio_efectivo": 1800,
+      "stock_estado": "Stock Alto"
+    },
+    {
+      "sku": "01140015",
+      "nombre": "SET DE MESA RECTANGULAR (140x80x76cm) + 6 SILLAS RATAN",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Muebles"
+      ],
+      "precio_lista": 353100,
+      "precio_efectivo": 330000,
+      "stock_estado": "Quedan: 15"
+    },
+    {
+      "sku": "01140014",
+      "nombre": "SET DE MESA CUADRADA 80x80x76 + 4 SILLAS RATAN",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Muebles"
+      ],
+      "precio_lista": 246100,
+      "precio_efectivo": 230000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01140013",
+      "nombre": "SILLA PLASTICA NEGRA CON DISEÑO",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Muebles"
+      ],
+      "precio_lista": 13589,
+      "precio_efectivo": 12700,
+      "stock_estado": "Stock Alto"
+    },
+    {
+      "sku": "01070084",
+      "nombre": "VENTILADOR TURBO ALPACA 18″ 75W ALPVK40N",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Climatización"
+      ],
+      "precio_lista": 49220,
+      "precio_efectivo": 46000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01070083",
+      "nombre": "VENTILADOR TUBO ALPACA 16″ 50W ALPVK30N",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Climatización"
+      ],
+      "precio_lista": 44940,
+      "precio_efectivo": 42000,
+      "stock_estado": "Stock Medio"
+    },
+    {
+      "sku": "01070082",
+      "nombre": "VENTILADOR DE TECHO ALPACA 56″ 70W ALP56TECH",
+      "marca": null,
+      "categorias": [
+        "Hogar",
+        "Climatización"
+      ],
+      "precio_lista": 57245,
+      "precio_efectivo": 53500,
+      "stock_estado": "Stock Alto"
+    },
+    {
+      "sku": "01010150",
+      "id_origen": 134352,
+      "nombre": "SET DE MANICURA Torno Profesional OM-210",
+      "marca": null,
+      "categorias": [
+        "Belleza & Cuidado Personal",
+        "Manicure & Pedicure"
+      ],
+      "precio_lista": 23300,
+      "precio_efectivo": 23300,
+      "moneda": "ARS",
+      "stock_estado": "Disponible",
+      "descripcion": "",
+      "imagenes": [
+        "https://dazimportadora.com.ar/wp-content/uploads/2026/09/articulos-agosto-2026-09-10T132016.703.jpg"
+      ],
+      "url_origen": "https://dazimportadora.com.ar/producto/set-de-manicure-om-210/",
+      "activo": true
+    }
+  ]
+}
