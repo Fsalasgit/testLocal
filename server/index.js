@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { calcularPrecio, precioPorMedio, ADMIN_PCT, PAGO_UNICO_DESCUENTO_PCT, DIAS_REFERENCIA, REDONDEO_PREDETERMINADO, validarRedondeo, calcularPlanCuotas, distribuirCuotas, CUOTAS_DISPONIBLES } from '../src/pricing.js';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(dirname, '..');
@@ -41,8 +42,15 @@ function normalizeProduct(p) {
   if (!p || typeof p !== 'object') return null;
   const sku = ensureString(p.sku || p.id_origen || p.id, 100);
   const nombre = decodeText(ensureString(p.nombre || p.name, 300));
-  const precio_lista = toNumber(p.precio_lista ?? p.precio ?? p.precio_efectivo);
+  // DAZ publica dos valores: para costos usamos el precio superior (referencia de
+  // transferencia), NUNCA el inferior identificado como «Efectivo Precio web».
+  // Un precio_transferencia_daz explícito, incluso null, impide recurrir al efectivo.
+  const explicitTransfer = Object.hasOwn(p, 'precio_transferencia_daz') || Object.hasOwn(p, 'precio_transferencia');
+  const rawTransfer = explicitTransfer ? (p.precio_transferencia_daz ?? p.precio_transferencia)
+    : (p.precio_lista ?? p.precio);
+  const precio_lista = toNumber(rawTransfer);
   if (!sku || !nombre || precio_lista === null || precio_lista <= 0) return null;
+  const efectivoWeb = toNumber(p.precio_efectivo_web ?? p.precio_efectivo);
   const candidateCategories = p.categorias || p.categories || [];
   const categorias = (Array.isArray(candidateCategories) ? candidateCategories : [candidateCategories])
     .map((x) => decodeText(ensureString(typeof x === 'string' ? x : x?.name, 90))).filter(Boolean).slice(0, 12);
@@ -54,7 +62,9 @@ function normalizeProduct(p) {
   let validUrl = '';
   try { const parsed = new URL(url_origen); if (parsed.protocol === 'https:' && parsed.hostname.replace(/^www\./, '') === 'dazimportadora.com.ar') validUrl = parsed.href; } catch {}
   return {
-    sku, nombre, marca: decodeText(ensureString(p.marca || '', 80)), categorias, precio_lista,
+    sku, nombre, marca: decodeText(ensureString(p.marca || '', 80)), categorias,
+    precio_lista, precio_transferencia_daz: precio_lista,
+    precio_efectivo_web: efectivoWeb !== null && efectivoWeb > 0 ? efectivoWeb : null,
     descripcion: decodeText(ensureString(p.descripcion || '', 5000)), imagenes,
     url_origen: validUrl,
     stock_estado: ensureString(p.stock_estado || '', 100), activo: p.activo !== false
@@ -62,13 +72,26 @@ function normalizeProduct(p) {
 }
 function blank() {
   const sample = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
-  return { settings: { globalFactor: 1.30, tiendaNombre: 'Mi Catálogo' }, products: sample.productos.map(normalizeProduct).filter(Boolean), overrides: {}, orders: [], nextOrder: 1 };
+  return { settings: { tasaAnual: 0, diasFinanciacion: DIAS_REFERENCIA, redondeo: REDONDEO_PREDETERMINADO, tiendaNombre: 'Mi Catálogo' }, products: sample.productos.map(normalizeProduct).filter(Boolean), overrides: {}, orders: [], nextOrder: 1 };
 }
 let db;
 try { db = JSON.parse(fs.readFileSync(dataPath, 'utf8')); }
 catch (e) { if (e.code !== 'ENOENT') throw e; db = blank(); fs.mkdirSync(path.dirname(dataPath), { recursive: true }); fs.writeFileSync(dataPath, JSON.stringify(db, null, 2)); }
 // Al actualizar una instalación existente, normalizamos también los productos ya importados.
 if (Array.isArray(db.products)) db.products = db.products.map(p => normalizeProduct(p) || p);
+// Migración no destructiva: conserva productos, pedidos y overrides anteriores.
+// No convierte 1,30 en tasa anual, porque ambos conceptos son distintos.
+db.settings ||= {};
+if (!Number.isFinite(Number(db.settings.tasaAnual)) || Number(db.settings.tasaAnual) < 0) db.settings.tasaAnual = 0;
+if (!Number.isInteger(Number(db.settings.diasFinanciacion)) || Number(db.settings.diasFinanciacion) < 1) db.settings.diasFinanciacion = DIAS_REFERENCIA;
+try { db.settings.redondeo = validarRedondeo(db.settings.redondeo ?? REDONDEO_PREDETERMINADO); } catch { db.settings.redondeo = REDONDEO_PREDETERMINADO; }
+db.redondeoOverrides ||= {};
+// Sin cuotas habilitadas por defecto: nunca publicamos financiación sin que el administrador la active.
+db.cuotasOverrides ||= {};
+db.tasaOverrides ||= {};
+db.orders ||= [];
+db.overrides ||= {};
+
 let pendingWrite = Promise.resolve();
 async function save() {
   const snapshot = JSON.stringify(db, null, 2);
@@ -80,12 +103,19 @@ async function save() {
   await pendingWrite;
 }
 function priced(p) {
-  const factor = db.overrides[p.sku] ?? db.settings.globalFactor;
-  return { ...p, precio_venta: Math.round(p.precio_lista * factor), factor_aplicado: factor };
+  const tasa = db.tasaOverrides[p.sku] ?? db.settings.tasaAnual;
+  const redondeo = db.redondeoOverrides[p.sku] ?? db.settings.redondeo;
+  const price = { ...p, ...calcularPrecio(p.precio_lista, tasa, db.settings.diasFinanciacion, redondeo), tasa_personalizada: Object.hasOwn(db.tasaOverrides, p.sku), redondeo_personalizado: Object.hasOwn(db.redondeoOverrides, p.sku) };
+  const enabled = (db.cuotasOverrides[p.sku] || []).filter(n => CUOTAS_DISPONIBLES.includes(n));
+  return { ...price, cuotas_habilitadas: enabled, planes_cuotas: enabled.map(meses => calcularPlanCuotas(price, meses)) };
 }
 function publicProduct(p) {
-  const { factor_aplicado, precio_lista, url_origen, ...safe } = priced(p);
-  // El navegador pide una imagen del propio servidor, no hace hotlink directamente a DAZ.
+  const { costo_daz, cargo_administrativo, base_financiada, interes_periodo,
+    descuento_pago_unico, ganancia_regular, ganancia_pago_unico, rentabilidad_regular_pct, rentabilidad_pago_unico_pct, precio_sin_redondeo, ajuste_redondeo, incremento_redondeo, redondeo_personalizado,
+    tasa_anual, dias_financiacion, tasa_personalizada, precio_lista, precio_transferencia_daz, precio_efectivo_web,
+    url_origen, planes_cuotas, ...safe } = priced(p);
+  // No exponer cálculos internos (costo ni ganancia) en el catálogo público.
+  safe.planes_cuotas = planes_cuotas.map(({meses,total,cuotas}) => ({meses,total,cuotas}));
   safe.imagen_url = safe.imagenes?.[0]
     ? `/api/images/${encodeURIComponent(p.sku)}?v=${crypto.createHash('sha256').update(safe.imagenes[0]).digest('hex').slice(0, 12)}`
     : null;
@@ -177,12 +207,14 @@ app.get('/api/images/:sku', async (req, res) => {
     return res.redirect(302, src.url);
   }
 });
-app.get('/api/catalog', (req, res) => res.json({ tiendaNombre: db.settings.tiendaNombre, products: db.products.filter(p => p.activo).map(publicProduct), categories: [...new Set(db.products.filter(p=>p.activo).flatMap(p=>p.categorias))].sort() }));
+app.get('/api/catalog', (req, res) => res.json({ tiendaNombre: db.settings.tiendaNombre, products: db.products.filter(p => p.activo).map(publicProduct), descuentoPagoUnicoPct: PAGO_UNICO_DESCUENTO_PCT, plazoDias: db.settings.diasFinanciacion, categories: [...new Set(db.products.filter(p=>p.activo).flatMap(p=>p.categorias))].sort() }));
 app.post('/api/orders', async (req, res) => {
   try {
     const telefono = ensureString(req.body.telefono, 40);
     const nombre = ensureString(req.body.nombre, 100);
     const nota = ensureString(req.body.nota, 1000);
+    const medioPago = req.body.medio_pago;
+    if (!['regular','pago_unico','cuotas_3','cuotas_6','cuotas_9'].includes(medioPago)) return res.status(400).json({ error: 'Seleccioná una modalidad de pago válida.' });
     const consentimiento = req.body.consentimiento === true;
     const rawItems = req.body.items;
     if (!consentimiento) return res.status(400).json({ error: 'Se requiere autorización para contactarte por este pedido.' });
@@ -195,16 +227,44 @@ app.post('/api/orders', async (req, res) => {
       combined.set(sku, (combined.get(sku) || 0) + q);
     }
     if ([...combined.values()].some(q=>q>99)) return res.status(400).json({ error: 'El máximo es 99 unidades por producto.' });
+    const mesesSeleccionados = medioPago.startsWith('cuotas_') ? Number(medioPago.slice(7)) : null;
     const items = [...combined].map(([sku,cantidad]) => {
       const p = db.products.find(p=>p.sku === sku && p.activo);
       if (!p) return null;
-      const { precio_venta }=priced(p);
-      return { sku, nombre: p.nombre, cantidad, precio_unitario: precio_venta, subtotal: precio_venta * cantidad, url_origen: p.url_origen };
+      const precio = priced(p);
+      if (mesesSeleccionados && !precio.cuotas_habilitadas.includes(mesesSeleccionados)) return null;
+      const planCuotas = mesesSeleccionados ? calcularPlanCuotas(precio, mesesSeleccionados) : null;
+      const precio_unitario = precioPorMedio(precio, medioPago);
+      return { sku, nombre: p.nombre, cantidad, precio_unitario, subtotal: precio_unitario * cantidad,
+        costo_unitario: precio.costo_daz, costo_total: precio.costo_daz * cantidad, fuente_costo: 'precio_superior_daz',
+        administrativo_unitario: precio.cargo_administrativo, administrativo_total: precio.cargo_administrativo * cantidad,
+        interes_unitario: precio.interes_periodo, interes_total: precio.interes_periodo * cantidad,
+        interes_adicional_unitario: planCuotas?.interes_adicional || 0,
+        interes_adicional_total: (planCuotas?.interes_adicional || 0) * cantidad,
+        redondeo_unitario: precio.ajuste_redondeo, redondeo_total: precio.ajuste_redondeo * cantidad, incremento_redondeo: precio.incremento_redondeo,
+        descuento_unitario: (medioPago === 'pago_unico' ? precio.descuento_pago_unico : 0),
+        descuento_total: (medioPago === 'pago_unico' ? precio.descuento_pago_unico : 0) * cantidad,
+        ganancia_bruta: (precio_unitario - precio.costo_daz) * cantidad,
+        tasa_anual: precio.tasa_anual, dias_financiacion: precio.dias_financiacion, url_origen: p.url_origen };
     });
-    if (items.some(x=>!x)) return res.status(400).json({ error: 'Hay productos que ya no están disponibles. Actualizá el carrito.' });
+    if (items.some(x=>!x)) return res.status(400).json({ error: 'Un producto no está disponible o no tiene habilitada esa cantidad de cuotas. Revisá tu carrito.' });
+    const totalServidor = items.reduce((sum, item) => sum + item.subtotal, 0);
+    const totalEsperado = toNumber(req.body.total_esperado);
+    if (totalEsperado === null || totalEsperado !== totalServidor) return res.status(409).json({ error: 'Los precios cambiaron desde que abriste el catálogo. Actualizá la página y revisá tu pedido antes de enviarlo.' });
     const now = new Date().toISOString();
     const id = `PED-${String(db.nextOrder++).padStart(5, '0')}`;
-    const order = { id, creado_en: now, actualizado_en: now, telefono, nombre, nota, consentimiento_contacto: consentimiento, items, total: items.reduce((a,b)=>a+b.subtotal,0), estado: 'pendiente' };
+    const order = { id, creado_en: now, actualizado_en: now, telefono, nombre, nota,
+      consentimiento_contacto: consentimiento, medio_pago: medioPago, items,
+      total: totalServidor,
+      total_costo: items.reduce((a,b)=>a+b.costo_total,0),
+      total_administrativo: items.reduce((a,b)=>a+b.administrativo_total,0),
+      total_interes: items.reduce((a,b)=>a+b.interes_total,0),
+      total_interes_adicional: items.reduce((a,b)=>a+b.interes_adicional_total,0),
+      plan_cuotas: mesesSeleccionados ? { meses:mesesSeleccionados, importes: distribuirCuotas(totalServidor,mesesSeleccionados), ganancia_promedio_mensual: items.reduce((a,b)=>a+b.ganancia_bruta,0)/mesesSeleccionados } : null,
+      total_redondeo: items.reduce((a,b)=>a+b.redondeo_total,0),
+      total_descuento: items.reduce((a,b)=>a+b.descuento_total,0),
+      ganancia_ticket: items.reduce((a,b)=>a+b.ganancia_bruta,0),
+      estado: 'pendiente' };
     db.orders.unshift(order);
     await save();
     res.status(201).json({ id: order.id, total: order.total, estado: order.estado });
@@ -228,27 +288,46 @@ app.post('/api/admin/login', async (req, res) => {
 });
 app.post('/api/admin/logout', adminOnly, (req,res) => { setCookie(res, '', 0); res.json({ ok:true }); });
 app.get('/api/admin/me', (req,res) => res.json({ authenticated: checkSession(req), user: checkSession(req) ? adminUser : null }));
-app.get('/api/admin/overview', adminOnly, (req,res) => res.json({ settings: db.settings, products: db.products.map(priced), orders: db.orders, overrides: db.overrides }));
+app.get('/api/admin/overview', adminOnly, (req,res) => res.json({ settings: db.settings, products: db.products.map(priced), orders: db.orders, tasaOverrides: db.tasaOverrides, redondeoOverrides: db.redondeoOverrides }));
 app.patch('/api/admin/settings', adminOnly, async (req,res) => {
-  const x = toNumber(req.body.globalFactor);
-  if (x === null || x < 1 || x > 10) return res.status(400).json({ error: 'El multiplicador global debe estar entre 1 y 10.' });
-  db.settings.globalFactor = x;
+  const tasa = toNumber(req.body.tasaAnual);
+  if (tasa === null || tasa < 0 || tasa > 1000) return res.status(400).json({ error: 'La TNA debe estar entre 0 y 1000%.' });
+  if (Object.hasOwn(req.body, 'redondeo')) {
+    try { db.settings.redondeo = validarRedondeo(req.body.redondeo); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  db.settings.tasaAnual = tasa;
   const name = ensureString(req.body.tiendaNombre || db.settings.tiendaNombre, 70);
   if (name) db.settings.tiendaNombre = name;
+  // Plazo fijo a 90 días como referencia comercial; se publica en las condiciones.
+  db.settings.diasFinanciacion = DIAS_REFERENCIA;
   await save(); res.json({ ok:true, settings: db.settings });
 });
 app.patch('/api/admin/products/:sku', adminOnly, async (req,res) => {
   const sku = req.params.sku;
   const p = db.products.find(x=>x.sku===sku);
   if (!p) return res.status(404).json({ error: 'No se encontró el producto.' });
-  if (Object.hasOwn(req.body, 'factor')) {
-    if (req.body.factor === null) delete db.overrides[sku];
-    else {
-      const f = toNumber(req.body.factor);
-      if (f===null || f<1 || f>10) return res.status(400).json({ error: 'El multiplicador debe estar entre 1 y 10.' });
-      db.overrides[sku] = f;
-    }
+  // Primero validamos TODA la solicitud; no mutamos la base si un dato es inválido.
+  let nextTna, nextRound, nextCuotas;
+  const changesTna = Object.hasOwn(req.body, 'tasaAnual');
+  const changesRound = Object.hasOwn(req.body, 'redondeo');
+  const changesCuotas = Object.hasOwn(req.body, 'cuotas');
+  if (changesTna && req.body.tasaAnual !== null) {
+    nextTna = toNumber(req.body.tasaAnual);
+    if (nextTna === null || nextTna < 0 || nextTna > 1000) return res.status(400).json({ error: 'La TNA del producto debe estar entre 0 y 1000%.' });
   }
+  if (changesRound && req.body.redondeo !== null) {
+    try { nextRound = validarRedondeo(req.body.redondeo); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+  if (changesCuotas) {
+    if (!Array.isArray(req.body.cuotas) || req.body.cuotas.length > 3 || req.body.cuotas.some(n=>!CUOTAS_DISPONIBLES.includes(n)) || new Set(req.body.cuotas).size !== req.body.cuotas.length)
+      return res.status(400).json({ error: 'Las cuotas deben ser una lista sin repetidos con valores 3, 6 o 9.' });
+    nextCuotas = [...req.body.cuotas].sort((a,b)=>a-b);
+  }
+  if (changesTna) { if (req.body.tasaAnual === null) delete db.tasaOverrides[sku]; else db.tasaOverrides[sku] = nextTna; }
+  if (changesRound) { if (req.body.redondeo === null) delete db.redondeoOverrides[sku]; else db.redondeoOverrides[sku] = nextRound; }
+  if (changesCuotas) db.cuotasOverrides[sku] = nextCuotas;
   if (typeof req.body.activo === 'boolean') p.activo = req.body.activo;
   await save(); res.json({ ok:true, product:priced(p) });
 });
@@ -265,17 +344,23 @@ app.post('/api/admin/import', adminOnly, async (req,res) => {
     const payload = Array.isArray(req.body) ? req.body : req.body.productos;
     if (!Array.isArray(payload) || !payload.length || payload.length > 10000) return res.status(400).json({error:'Esperaba productos[] (1 a 10.000 registros).'});
     const normalized = payload.map(normalizeProduct).filter(Boolean);
-    if (!normalized.length) return res.status(400).json({error:'No se encontraron productos válidos con SKU, nombre y precio de lista.'});
+    if (!normalized.length) return res.status(400).json({error:'No se encontraron productos válidos con SKU, nombre y precio superior de DAZ. Verificá la extracción.'});
     const prev = new Map(db.products.map(x=>[x.sku,x]));
     const unique = new Map();
     for (const p of normalized) {
       const old = prev.get(p.sku);
       unique.set(p.sku, { ...p, activo: old ? old.activo : p.activo });
     }
-    let added = 0, updated = 0;
-    for (const [sku,p] of unique) { if (prev.has(sku)) updated++; else added++; prev.set(sku,p); }
+    let added = 0, updated = 0, costosModificados = 0;
+    for (const [sku,p] of unique) {
+      if (prev.has(sku)) {
+        updated++;
+        if (Number(prev.get(sku).precio_lista) !== p.precio_lista) costosModificados++;
+      } else added++;
+      prev.set(sku,p);
+    }
     db.products = [...prev.values()];
-    await save(); res.json({ok:true, recibidos:payload.length, validos:unique.size, agregados:added, actualizados:updated, total:db.products.length});
+    await save(); res.json({ok:true, recibidos:payload.length, validos:unique.size, omitidos:payload.length-normalized.length, agregados:added, actualizados:updated, costos_modificados:costosModificados, total:db.products.length});
   } catch(e) { console.error(e); res.status(500).json({error:'No se pudo importar el catálogo.'}); }
 });
 // Para la tienda instalada en un VPS, Express también entrega los archivos estáticos de Vite.

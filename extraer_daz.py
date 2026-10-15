@@ -2,7 +2,7 @@
 """Exporta catálogo público de DAZ a JSON. Ejecutar: pip install requests beautifulsoup4; python extraer_daz.py"""
 import json, re, time, sys
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit
 from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup
@@ -11,6 +11,20 @@ BASE='https://dazimportadora.com.ar'
 UA='CatalogResearchBot/1.0 (public-catalog-export; respectful rate limit)'
 S=requests.Session(); S.headers.update({'User-Agent':UA,'Accept':'text/html,application/json'})
 WAIT=1.5
+
+def key_url(url):
+    if not url:return ''
+    u=urlsplit(urljoin(BASE,str(url)))
+    return u.path.rstrip('/').lower()
+
+def transfer_amounts(text):
+    vals=[money(x) for x in re.findall(r'\$\s*[\d.,]+',str(text))]
+    vals=[v for v in vals if v is not None and v>0]
+    # Solo dos precios visibles permiten distinguir el superior del efectivo web.
+    # Nunca aplicar 7% fijo a los costos provenientes de una API.
+    if len(vals)<2:return (None,vals[0] if vals else None)
+    return vals[0],vals[1]
+
 
 def fetch(url):
     for n in range(3):
@@ -44,7 +58,10 @@ def product_from_store(p):
     imgs=[i.get('src') for i in p.get('images',[]) if i.get('src')]
     return {'sku':p.get('sku') or str(p.get('id')),'id_origen':p.get('id'),'nombre':p.get('name'),
      'marca':None,'categorias':[c.get('name') for c in p.get('categories',[]) if c.get('name')],
-     'precio_lista':pr(prices.get('regular_price')),'precio_efectivo':pr(prices.get('price')),
+     # Los valores de la API pueden NO reflejar el precio superior que muestra el sitio.
+     # La base de transferencia queda explícitamente sin verificar hasta cruzar HTML.
+     'precio_lista':None,'precio_transferencia_daz':None,
+     'precio_efectivo':pr(prices.get('price')),'precio_efectivo_web':pr(prices.get('price')),
      'moneda':prices.get('currency_code') or 'ARS','stock_estado':('Disponible' if p.get('is_in_stock') else 'Agotado') if p.get('is_in_stock') is not None else None,
      'descripcion':BeautifulSoup(p.get('description') or p.get('short_description') or '', 'html.parser').get_text(' ',strip=True),
      'imagenes':imgs,'url_origen':p.get('permalink'),'activo':True}
@@ -67,14 +84,18 @@ def parse_card(card):
     cats=[txt(c) for c in card.select('.posted_in a, .product-categories a, .wd-product-cats a')]
     cats=list(dict.fromkeys(x for x in cats if x))
     brand=txt(card.select_one('.wd-product-brands a, .product-brand a')) or None
-    # El precio mostrado en la tarjeta es listado/efectivo; no se infiere un descuento cuando no hay dos precios.
-    amounts=[money(x) for x in re.findall(r'\$\s*[\d.,]+',raw)]
-    amounts=[x for x in amounts if x is not None]
+    # Extraer los DOS precios visibles: el superior para transferencia, el inferior efectivo web.
+    # Usar el elemento de precio primero para evitar montos de otro texto en la tarjeta.
+    price_node=card.select_one('.price, .wd-product-price, .product-price')
+    cost, cash=transfer_amounts(txt(price_node) if price_node else raw)
+    if cost is None and price_node is not None:
+        cost, cash=transfer_amounts(raw)
     stock=re.search(r'(Stock\s+(?:Alto|Medio|Bajo)|Quedan\s*:\s*\d+|Sin stock)',raw,re.I)
     im=card.select_one('img[data-src],img[src]')
     image=(im.get('data-src') or im.get('src')) if im else None
     return {'sku':sku,'id_origen':None,'nombre':name,'marca':brand,'categorias':cats,
-    'precio_lista':amounts[0] if amounts else None,'precio_efectivo':amounts[-1] if amounts else None,
+    'precio_lista':cost,'precio_transferencia_daz':cost,
+    'precio_efectivo':cash,'precio_efectivo_web':cash,
     'moneda':'ARS','stock_estado':stock.group(1) if stock else None,'descripcion':'',
     'imagenes':[urljoin(BASE,image)] if image and not image.startswith('data:') else [],
     'url_origen':url,'activo':True}
@@ -98,6 +119,15 @@ def enrich(item):
             u=im.get('data-large_image') or im.get('data-src') or im.get('src')
             if u and not u.startswith('data:'):images.append(urljoin(BASE,u))
     if images:item['imagenes']=list(dict.fromkeys(images))
+    if not item.get('precio_transferencia_daz'):
+        node=sp.select_one('.summary .price, .single-product-content .price, p.price, .product-price')
+        if node:
+            superior, efectivo=transfer_amounts(txt(node))
+            if superior is not None:
+                item['precio_lista']=superior
+                item['precio_transferencia_daz']=superior
+                item['precio_efectivo']=efectivo
+                item['precio_efectivo_web']=efectivo
     return item
 
 def api_export():
@@ -115,6 +145,46 @@ def api_export():
         print(f'API: {len(out)} productos',flush=True);time.sleep(WAIT)
         if len(data)<100:break
     return out or None
+
+def cross_prices_against_website(products):
+    # Cruce por permalink + SKU entre Woo Store API y catálogo visible.
+    by_url={key_url(p.get('url_origen')):p for p in products if key_url(p.get('url_origen'))}
+    by_sku={str(p.get('sku')):p for p in products if p.get('sku')}
+    resolved=set();page=0;seen_signatures=set()
+    for page in range(1,101):
+        url=f'{BASE}/productos/' if page==1 else f'{BASE}/productos/page/{page}/'
+        soup=BeautifulSoup(fetch(url).text,'html.parser')
+        cards=listing_cards(soup)
+        if not cards:
+            if page==1:raise RuntimeError('No se pudieron leer precios visibles de DAZ: no continuar con costos de la API.')
+            break
+        signature=tuple(key_url(a.get('href')) for card in cards for a in card.select('a[href*="/producto/"]')[:1])
+        if signature in seen_signatures:
+            print('Se detectó una página de catálogo repetida; deteniendo paginación.',flush=True)
+            break
+        seen_signatures.add(signature)
+        for card in cards:
+            visible=parse_card(card)
+            original=by_url.get(key_url(visible.get('url_origen'))) or by_sku.get(str(visible.get('sku')))
+            if not original:continue
+            cost=visible.get('precio_transferencia_daz')
+            if cost:
+                original['precio_lista']=cost
+                original['precio_transferencia_daz']=cost
+                original['precio_efectivo']=visible.get('precio_efectivo')
+                original['precio_efectivo_web']=visible.get('precio_efectivo_web')
+                resolved.add(original['sku'])
+        print(f'Página visible {page}: precios confirmados {len(resolved)}/{len(products)}',flush=True)
+        if len(cards)<9:break
+    # Algunos artículos no figuran en el listado: intentar su ficha individual.
+    unresolved=[p for p in products if not p.get('precio_transferencia_daz')]
+    if unresolved:
+        print(f'{len(unresolved)} sin precio superior confirmado; consultando fichas individuales...',flush=True)
+    for i,p in enumerate(unresolved,1):
+        try:enrich(p)
+        except Exception as e:print(f'Ficha sin precio verificado {p.get("sku")}: {e}',file=sys.stderr)
+        if i%25==0:print(f'Fichas de precio: {i}/{len(unresolved)}',flush=True)
+    return products
 
 def html_export():
     out={}
@@ -152,6 +222,13 @@ def main():
     if products is None:
         print('API pública no disponible; recurriendo a HTML público.')
         products=html_export();metodo='HTML público'
+    else:
+        print('API pública disponible, verificando los DOS precios mostrados al cliente...')
+        products=cross_prices_against_website(products)
+        metodo='WooCommerce Store API + precios visibles HTML'
+    without=sum(not p.get('precio_transferencia_daz') for p in products)
+    if without:
+        print(f'AVISO: {without} productos sin precio superior verificado: se excluirán de la tienda al importar.',file=sys.stderr)
     products=sorted(products,key=lambda p:(p.get('nombre') or '').casefold())
     categories=sorted(set(c for p in products for c in p['categorias']))
     result={'fuente':f'{BASE}/productos/','extraido_utc':datetime.now(timezone.utc).isoformat(),
